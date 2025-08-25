@@ -2,11 +2,14 @@
 #![no_main]
 
 use cortex_m_rt::{entry, exception};
+use cortex_m::interrupt::{self, Mutex};
+use core::cell::RefCell;
 use stm32l4::stm32l4x1;
 use rtt_target::{rprintln, rtt_init_print};
+use stm32l4xx_hal::prelude::*;
 use stm32l4xx_hal::watchdog::{IndependentWatchdog};
 use stm32l4xx_hal::time::MilliSeconds;
-use embedded_hal::watchdog::{Watchdog, WatchdogEnable};
+use stm32l4xx_hal::rtc::{Rtc, RtcClockSource, RtcConfig};
 
 // Which address should be corrupted, with an allowed range
 const APPROXIMATE_ADDRESS_TO_CORRUPT: usize = 0x1_0000;
@@ -24,14 +27,27 @@ mod hw;
 use flash::*;
 use hw::*;
 
+static RTC_INSTANCE: Mutex<RefCell<Option<Rtc>>> = Mutex::new(RefCell::new(None));
+
+fn with_rtc<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut Rtc) -> R,
+{
+    interrupt::free(|cs| {
+        let mut rtc_ref = RTC_INSTANCE.borrow(cs).borrow_mut();
+        let rtc = rtc_ref.as_mut().expect("RTC not initialized");
+        f(rtc)
+    })
+}
+
 #[panic_handler]
 fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
     set_red_led(true);
 
-    let peripherals = unsafe { stm32l4x1::Peripherals::steal() };
-
-    // Clear backup register zero - allows manual reset
-    peripherals.RTC.bkpr[0].write(|w| unsafe { w.bits(0) });
+    // Use the shared RTC instance safely
+    with_rtc(|rtc| {
+        rtc.write_backup_register(0, 0);
+    });
 
     // Use HAL watchdog in panic loop
     let dp = unsafe { stm32l4xx_hal::stm32::Peripherals::steal() };
@@ -121,43 +137,58 @@ fn main() -> ! {
     rprintln!("Hello from STM32 via RTT!");
     
     let peripherals = unsafe { stm32l4x1::Peripherals::steal() };
-    // For backup register access
-    hw::enable_rtc(&peripherals.RCC, &peripherals.RTC, &peripherals.PWR);
+    let dp = unsafe { stm32l4xx_hal::stm32::Peripherals::steal() };
+    let mut rcc = dp.RCC.constrain();
+    let mut pwr = dp.PWR.constrain(&mut rcc.apb1r1);
+    let rtc = Rtc::rtc(
+        dp.RTC,
+        &mut rcc.apb1r1,
+        &mut rcc.bdcr,
+        &mut pwr.cr1,
+        RtcConfig::default().clock_config(RtcClockSource::LSI),
+    );
+    interrupt::free(|cs| {
+        RTC_INSTANCE.borrow(cs).replace(Some(rtc));
+    });
 
     // Basically detect the first boot and set the top/bottom of the range
-    let magic_val = peripherals.RTC.bkpr[0].read().bits();
+    let magic_val = with_rtc(|rtc| rtc.read_backup_register(0).unwrap());
     if magic_val != MAGIC_VALUE {
         rprintln!("First boot detected, setting up backup registers...");
-        // Note that we're no longer in the first boot
-        peripherals.RTC.bkpr[0].write(|w| unsafe { w.bits(MAGIC_VALUE) });
-
-        // Register 1 and 2 store the bottom and top of the range
-        peripherals.RTC.bkpr[1].write(|w| unsafe { w.bits(1) });
-        peripherals.RTC.bkpr[2].write(|w| unsafe { w.bits(1_000) });
-        peripherals.RTC.bkpr[3].write(|w| unsafe { w.bits(0) });
+        with_rtc(|rtc| {
+            rtc.write_backup_register(0, MAGIC_VALUE);
+            rtc.write_backup_register(1, 1);
+            rtc.write_backup_register(2, 1_000);
+            rtc.write_backup_register(3, 0);
+        });
     }
 
     // This is a reset counter, which is interesting when debugging
-    peripherals.RTC.bkpr[4].modify(|r, w| unsafe { w.bits(r.bits() + 1) });
+    with_rtc(|rtc| {
+        let cnt = rtc.read_backup_register(4).unwrap();
+        rtc.write_backup_register(4, cnt + 1);
+    });
 
-    let mut bottom = peripherals.RTC.bkpr[1].read().bits();
-    let mut top = peripherals.RTC.bkpr[2].read().bits();
+    let bottom = with_rtc(|rtc| rtc.read_backup_register(1).unwrap());
+    let top = with_rtc(|rtc| rtc.read_backup_register(2).unwrap());
     let mut middle = (bottom + top) / 2;
 
     // If we are very close, we have likely missed the exact time and need to try again
     let very_similar = top - bottom < 5;
     assert!(!very_similar);
 
-    let state = peripherals.RTC.bkpr[3].read().bits();
+    let state = with_rtc(|rtc| rtc.read_backup_register(3).unwrap());
 
+    let mut bottom = bottom;
+    let mut top = top;
     if state == STATE_BEFORE_WRITE {
         // Apparently we run too long before the reset, so we need to go down
         top = middle;
-        peripherals.RTC.bkpr[2].write(|w| unsafe { w.bits(top) });
+        with_rtc(|rtc| rtc.write_backup_register(2, top));
     } else if state == STATE_AFTER_WRITE {
         // Apparently reset too late, so go up a bit
         bottom = middle;
-        peripherals.RTC.bkpr[1].write(|w| unsafe { w.bits(bottom) });
+        with_rtc(|rtc| rtc.write_backup_register(1, bottom));
     }
 
     // We basically do a binary search over multiple resets to find the right time to corrupt
@@ -184,7 +215,6 @@ fn main() -> ! {
     let page_number = flash.address_to_page_number(APPROXIMATE_ADDRESS_TO_CORRUPT as u32);
 
     // We use the watchdog to time the corruption 
-    let dp = unsafe { stm32l4xx_hal::stm32::Peripherals::steal() };
     let mut watchdog = IndependentWatchdog::new(dp.IWDG);
     
     // First of all, we erase the page, as otherwise we can't write to it

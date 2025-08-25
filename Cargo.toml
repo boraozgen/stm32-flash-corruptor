@@ -14,7 +14,6 @@ static_assertions = "1.1.0"
 stm32l4 = { version = "0.15.1", features = ["stm32l4x1", "rt"] }
 rtt-target = "0.6"
 stm32l4xx-hal = { version = "0.7", features = ["rt", "stm32l451"] }
-embedded-hal = "0.2.6"
 
 # Uncomment for the panic example.
 # panic-itm = "0.4.1"
