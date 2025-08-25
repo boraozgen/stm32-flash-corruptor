@@ -2,11 +2,15 @@
 #![no_main]
 
 use cortex_m_rt::{entry, exception};
-use stm32l4::stm32l4r5;
+use stm32l4::stm32l4x1;
+use rtt_target::{rprintln, rtt_init_print};
+use stm32l4xx_hal::watchdog::{IndependentWatchdog};
+use stm32l4xx_hal::prelude::*; // This imports U32Ext for .ms()
+use fugit::MillisDurationU32;
 
 // Which address should be corrupted, with an allowed range
-const APPROXIMATE_ADDRESS_TO_CORRUPT: usize = 0x2300;
-const CORRUPT_RANGE: usize = 0x8;
+const APPROXIMATE_ADDRESS_TO_CORRUPT: usize = 0x1_0000;
+const CORRUPT_RANGE: usize = 0x20;
 static_assertions::const_assert!(CORRUPT_RANGE > 0);
 
 // On the first page, this tool itself lies. Don't let it erase itself!
@@ -24,33 +28,34 @@ use hw::*;
 fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
     set_red_led(true);
 
-    let peripherals = unsafe { stm32l4r5::Peripherals::steal() };
+    let peripherals = unsafe { stm32l4x1::Peripherals::steal() };
 
     // Clear backup register zero - allows manual reset
     peripherals.RTC.bkpr[0].write(|w| unsafe { w.bits(0) });
 
+    // Use HAL watchdog in panic loop
+    let dp = unsafe { stm32l4xx_hal::stm32::Peripherals::steal() };
+    let mut watchdog = IndependentWatchdog::new(dp.IWDG);
     loop {
-        watchdog_feed_min(&peripherals.IWDG);
+        watchdog.feed();
     }
 }
 
 macro_rules! bad_thing_happened {
     () => {{
+        rprintln!("exception occurred");
         // Turns on the green LED
-        let peripherals = unsafe { stm32l4r5::Peripherals::steal() };
+        let peripherals = unsafe { stm32l4x1::Peripherals::steal() };
         peripherals.RTC.bkpr[0].write(|w| unsafe { w.bits(0) });
+
+        // Use HAL watchdog to feed in the loop
+        let dp = unsafe { stm32l4xx_hal::stm32::Peripherals::steal() };
+        let mut watchdog = IndependentWatchdog::new(dp.IWDG);
+        // watchdog.start(MillisDurationU32::millis(100));
 
         let reg_content = peripherals.FLASH.eccr.read();
         let is_flash_nmi: bool = {
-            let flash = Flash::new(peripherals.FLASH);
-            if flash.is_dualbank() {
-                // In dual-bank mode, Bit 29 (ECCD2) is reserved, so only look at bit 31 (ECCD)
-                reg_content.eccd().bit_is_set()
-            } else {
-                /// Bit 31 and Bit 29 - either lower or upper 64 bits of 128 bit value
-                const ECCD_ECCD2_MASK: u32 = 0xa0000000;
-                reg_content.bits() & ECCD_ECCD2_MASK != 0
-            }
+            reg_content.eccd().bit_is_set()
         };
 
         let dead_addr = reg_content.addr_ecc().bits() | ((reg_content.bk_ecc().bit() as u32) << 20);
@@ -64,7 +69,7 @@ macro_rules! bad_thing_happened {
                 set_green_led(true);
 
                 loop {
-                    watchdog_feed(&peripherals.IWDG);
+                    watchdog.feed();
                 }
             } else {
                 set_red_led(true);
@@ -110,20 +115,25 @@ const MAGIC_VALUE: u32 = 0x99999999;
 
 #[entry]
 fn main() -> ! {
-    let peripherals = unsafe { stm32l4r5::Peripherals::steal() };
+    // Initialize RTT
+    rtt_init_print!();
+
+    rprintln!("Hello from STM32 via RTT!");
+    
+    let peripherals = unsafe { stm32l4x1::Peripherals::steal() };
     // For backup register access
     hw::enable_rtc(&peripherals.RCC, &peripherals.RTC, &peripherals.PWR);
 
     // Basically detect the first boot and set the top/bottom of the range
     let magic_val = peripherals.RTC.bkpr[0].read().bits();
     if magic_val != MAGIC_VALUE {
+        rprintln!("First boot detected, setting up backup registers...");
         // Note that we're no longer in the first boot
         peripherals.RTC.bkpr[0].write(|w| unsafe { w.bits(MAGIC_VALUE) });
 
         // Register 1 and 2 store the bottom and top of the range
-        peripherals.RTC.bkpr[1].write(|w| unsafe { w.bits(100) });
-        // In my tests, usually a value of just below ~400k is fine, but it's a bit random
-        peripherals.RTC.bkpr[2].write(|w| unsafe { w.bits(1_000_000) });
+        peripherals.RTC.bkpr[1].write(|w| unsafe { w.bits(1) });
+        peripherals.RTC.bkpr[2].write(|w| unsafe { w.bits(1_000) });
         peripherals.RTC.bkpr[3].write(|w| unsafe { w.bits(0) });
     }
 
@@ -174,14 +184,15 @@ fn main() -> ! {
     let page_number = flash.address_to_page_number(APPROXIMATE_ADDRESS_TO_CORRUPT as u32);
 
     // We use the watchdog to time the corruption 
-    activate_watchdog(&peripherals.IWDG).unwrap();
-
+    let dp = unsafe { stm32l4xx_hal::stm32::Peripherals::steal() };
+    let mut watchdog = IndependentWatchdog::new(dp.IWDG);
+    
     // First of all, we erase the page, as otherwise we can't write to it
     let mut flash_unlocked = flash.unlock().unwrap();
     flash_unlocked.erase_page(page_number).unwrap();
 
     // After this, we have 0.125ms until we have to be within a write
-    watchdog_feed_min(&peripherals.IWDG);
+    watchdog.start(MillisDurationU32::micros(100));
 
     // This gets us towards the time window...
     // Also this definitely isn't exactly cycles, but it does not really matter which unit of time we use

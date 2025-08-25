@@ -1,9 +1,9 @@
 use cortex_m::asm::delay;
-use stm32l4::stm32l4r5::{self, PWR, RCC, RTC};
+use stm32l4::stm32l4x1::{self, PWR, RCC, RTC};
 
 pub fn set_green_led(state: bool) {
     // PC7
-    let peripherals = unsafe { stm32l4r5::Peripherals::steal() };
+    let peripherals = unsafe { stm32l4x1::Peripherals::steal() };
     peripherals.RCC.ahb2enr.modify(|_, w| w.gpiocen().set_bit());
     peripherals.GPIOC.moder.modify(|_, w| w.moder7().output());
     peripherals.GPIOC.odr.modify(|_, w| w.odr7().bit(state));
@@ -11,53 +11,18 @@ pub fn set_green_led(state: bool) {
 
 pub fn set_red_led(state: bool) {
     // PB14
-    let peripherals = unsafe { stm32l4r5::Peripherals::steal() };
+    let peripherals = unsafe { stm32l4x1::Peripherals::steal() };
     peripherals.RCC.ahb2enr.modify(|_, w| w.gpioben().set_bit());
     peripherals.GPIOB.moder.modify(|_, w| w.moder14().output());
     peripherals.GPIOB.odr.modify(|_, w| w.odr14().bit(state));
 }
 
 pub fn set_blue_led(state: bool) {
-    // PB7
-    let peripherals = unsafe { stm32l4r5::Peripherals::steal() };
+    // PB1
+    let peripherals = unsafe { stm32l4x1::Peripherals::steal() };
     peripherals.RCC.ahb2enr.modify(|_, w| w.gpioben().set_bit());
-    peripherals.GPIOB.moder.modify(|_, w| w.moder7().output());
-    peripherals.GPIOB.odr.modify(|_, w| w.odr7().bit(state));
-}
-
-pub fn activate_watchdog(iwdg: &stm32l4r5::IWDG) -> Result<(), ()> {
-    iwdg.kr.write(|w| w.key().start());
-    iwdg.kr.write(|w| w.key().enable());
-    // Smallest prescaler - unit of 1 is 0.125ms
-    iwdg.pr.modify(|_, w| w.pr().divide_by4());
-    iwdg.rlr.modify(|_, w| w.rl().bits(0xFFF));
-
-    let mut loop_iters: u32 = 0;
-    const MAX_LOOP_ITER: u32 = 16000 * 10;
-
-    let activation_result = loop {
-        loop_iters += 1;
-
-        let r = iwdg.sr.read();
-
-        // We wait for all watchdog updates to complete - but we will not wait forever
-        if r.pvu().bit_is_clear() && r.rvu().bit_is_clear() && r.wvu().bit_is_clear() {
-            break Ok(());
-        } else if loop_iters > MAX_LOOP_ITER {
-            // Timeout
-            break Err(());
-        }
-    };
-    iwdg.kr.write(|w| w.key().reset());
-    activation_result
-}
-
-pub fn watchdog_feed_min(iwdg: &stm32l4r5::IWDG) {
-    iwdg.kr.write(|w| unsafe { w.key().bits(1) });
-}
-
-pub fn watchdog_feed(iwdg: &stm32l4r5::IWDG) {
-    iwdg.kr.write(|w| w.key().reset());
+    peripherals.GPIOB.moder.modify(|_, w| w.moder1().output());
+    peripherals.GPIOB.odr.modify(|_, w| w.odr1().bit(state));
 }
 
 pub fn enable_rtc(rcc: &RCC, rtc: &RTC, pwr: &PWR) {

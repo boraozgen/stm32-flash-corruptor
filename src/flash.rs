@@ -1,7 +1,7 @@
 use core::ops::Deref;
 
 use cortex_m::asm::dmb;
-use stm32l4::stm32l4r5;
+use stm32l4::stm32l4x1;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Error {
@@ -17,7 +17,7 @@ pub enum Error {
 
 /// Abstracts interaction with the flash hardware
 pub struct Flash {
-    flash: stm32l4r5::FLASH,
+    flash: stm32l4x1::FLASH,
 }
 
 /// Represents a Flash object that has been unlocked for programming.
@@ -58,31 +58,13 @@ impl Flash {
     const FLASH_KEY2: u32 = 0xCDEF_89AB;
 
     /// Create flash interaction abstraction from HAL object
-    pub fn new(flash: stm32l4r5::FLASH) -> Self {
+    pub fn new(flash: stm32l4x1::FLASH) -> Self {
         Flash { flash }
     }
 
-    /// True if the chip is in dual bank mode. If false, the chip is in single bank mode.
-    /// This decides whether the flash page size is [DUAL_BANK_PAGE_SIZE] or [SINGLE_BANK_PAGE_SIZE]
-    pub fn is_dualbank(&self) -> bool {
-        // Since we are on an 2MB device, we need to care about the DBANK bit (Bit 22),
-        // while <= 1MB devices would have to check DB1M (Bit 21)
-        // stm32l4 crate doesn't have a function for DBANK, so do it manually
-        // Note that it does have one for DB1M named "dualbank", which is the wrong one
-        // to check on a 2MB device.
-        const BIT_22_BITMASK: u32 = 1 << 22;
-        let dual_bank_bit = self.flash.optr.read().bits() & BIT_22_BITMASK;
-
-        return dual_bank_bit != 0;
-    }
-
-    /// Page size in the current mode (depending on [Flash::is_dualbank])
+    /// Page size
     pub fn page_size(&self) -> u32 {
-        if self.is_dualbank() {
-            0x1000
-        } else {
-            0x2000
-        }
+        0x800
     }
 
     /// Reads the current flash status:
@@ -153,9 +135,7 @@ impl<'a> FlashUnlocked<'a> {
         });
     }
 
-    /// Erases the flash page with the given number. It is recommended to calculate the flash page
-    /// using [Flash::address_to_page_number], as this value depends on the flash mode. This means, that for
-    /// the same address, the page number might be different depending on the flash mode.
+    /// Erases the flash page with the given number.
     pub fn erase_page(&mut self, page_number: u32) -> Result<(), Error> {
         // According to "3.3.6 Flash main memory erase sequences"
 
@@ -165,56 +145,27 @@ impl<'a> FlashUnlocked<'a> {
         // 2. Check and clear all error programming flags due to a previous programming. If not, PGSERR is set
         self.clear_programming_flags();
 
-        // Step Nr. 3 differentiates between dual- and single-bank mode
-        if self.is_dualbank() {
-            if page_number >= 512 {
-                return Err(Error::InvalidPage);
-            }
-
-            // During proofs, we want to skip hardware interaction
-            #[cfg(kani)]
-            return Ok(());
-
-            // Select either bank 0 or 1, and inside of that, the page number
-            // Note that the manual calls them Bank 1 and Bank 2, but we call them 0 and 1
-            let bank = page_number / 256;
-            let page_number = page_number % 256;
-
-            // We are in Dual-Bank mode, pages are 0x1000 bytes long
-            self.flash.flash.cr.modify(|_, w| unsafe {
-                // set the PER bit
-                w.per()
-                    .set_bit()
-                    // Select the bank (false => Bank 1, true => Bank 2)
-                    .bker()
-                    .bit(bank == 1)
-                    // and select the page to erase (PNB)
-                    .pnb()
-                    .bits(page_number as u8)
-            });
-        } else {
-            // Single-Bank mode, we have 256 pages with size 0x2000 bytes
-            if page_number >= 256 {
-                return Err(Error::InvalidPage);
-            }
-
-            // During proofs, we want to skip hardware interaction
-            #[cfg(kani)]
-            return Ok(());
-
-            self.flash.flash.cr.modify(|_, w| unsafe {
-                w
-                    // Set the PER bit
-                    .per()
-                    .set_bit()
-                    // Select the page to erase
-                    .pnb()
-                    .bits(page_number as u8)
-                    // The BKER bit [...] must be kept cleared
-                    .bker()
-                    .clear_bit()
-            });
+        // Single-Bank mode, we have 256 pages with size 0x800 bytes
+        if page_number >= 256 {
+            return Err(Error::InvalidPage);
         }
+
+        // During proofs, we want to skip hardware interaction
+        #[cfg(kani)]
+        return Ok(());
+
+        self.flash.flash.cr.modify(|_, w| unsafe {
+            w
+                // Set the PER bit
+                .per()
+                .set_bit()
+                // Select the page to erase
+                .pnb()
+                .bits(page_number as u8)
+                // The BKER bit [...] must be kept cleared
+                .bker()
+                .clear_bit()
+        });
 
         // 4. Set the STRT bit in the FLASH_CR register
         self.flash.flash.cr.modify(|_, w| w.start().set_bit());

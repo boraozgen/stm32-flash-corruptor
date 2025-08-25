@@ -1,0 +1,12 @@
+[default.general]
+chip = "STM32L451CEUx"
+connect_under_reset = true
+
+[default.probe]
+protocol = "Swd"
+
+[default.flashing]
+enabled = true
+
+[default.rtt]
+enabled = false
