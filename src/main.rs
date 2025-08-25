@@ -5,8 +5,8 @@ use cortex_m_rt::{entry, exception};
 use stm32l4::stm32l4x1;
 use rtt_target::{rprintln, rtt_init_print};
 use stm32l4xx_hal::watchdog::{IndependentWatchdog};
-use stm32l4xx_hal::prelude::*; // This imports U32Ext for .ms()
-use fugit::MillisDurationU32;
+use stm32l4xx_hal::time::MilliSeconds;
+use embedded_hal::watchdog::{Watchdog, WatchdogEnable};
 
 // Which address should be corrupted, with an allowed range
 const APPROXIMATE_ADDRESS_TO_CORRUPT: usize = 0x1_0000;
@@ -192,7 +192,7 @@ fn main() -> ! {
     flash_unlocked.erase_page(page_number).unwrap();
 
     // After this, we have 0.125ms until we have to be within a write
-    watchdog.start(MillisDurationU32::micros(100));
+    watchdog.start(MilliSeconds::from_ticks(0));
 
     // This gets us towards the time window...
     // Also this definitely isn't exactly cycles, but it does not really matter which unit of time we use

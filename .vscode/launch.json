@@ -7,8 +7,8 @@
         {
             "type": "probe-rs-debug",
             "request": "launch",
-            "name": "Launch",
-            // "preLaunchTask": "${defaultBuildTask}",
+            "name": "Launch Debug",
+            "preLaunchTask": "${defaultBuildTask}",
             "speed": 4000,
             "cwd": "${workspaceFolder}",
             "connectUnderReset": true,
@@ -19,22 +19,20 @@
             },
             "coreConfigs": [
                 {
-                    "programBinary": "./target/thumbv7em-none-eabihf/release/${workspaceFolderBasename}"
+                    "programBinary": "./target/thumbv7em-none-eabi/debug/${workspaceFolderBasename}"
                 }
             ]
         },
         {
             "type": "probe-rs-debug",
             "request": "attach",
-            "name": "Attach",
-            // "preLaunchTask": "${defaultBuildTask}",
+            "name": "Attach Release",
             "speed": 4000,
             "cwd": "${workspaceFolder}",
-            // "connectUnderReset": true,
             "chip": "STM32L451CEUx",
             "coreConfigs": [
                 {
-                    "programBinary": "./target/thumbv7em-none-eabihf/release/${workspaceFolderBasename}",
+                    "programBinary": "./target/thumbv7em-none-eabi/release/${workspaceFolderBasename}",
                     "svdFile": "${workspaceFolder}/STM32L452.svd"
                 }
             ]
